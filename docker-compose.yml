@@ -1,0 +1,22 @@
+services:
+  transcription:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DEVICE: cuda
+      COMPUTE_TYPE: float16
+      WHISPER_MODEL: small
+      TRANSCRIBE_WORKERS: 2
+    volumes:
+      - ./resources/assets/:/assets/
+      - ./resources/hf_data/hub:/root/.cache/huggingface/hub
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

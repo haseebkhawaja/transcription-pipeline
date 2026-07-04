@@ -1,0 +1,23 @@
+{
+  "filename": "short_clip.mp3",
+  "duration_sec": 12.0,
+  "language": "en",
+  "num_chunks": 1,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 4.0,
+      "text": "Thanks for joining the call today."
+    },
+    {
+      "start": 4.0,
+      "end": 8.0,
+      "text": "Let's start with a quick status update."
+    },
+    {
+      "start": 8.0,
+      "end": 12.0,
+      "text": "The backend migration is on track for next week."
+    }
+  ]
+}
