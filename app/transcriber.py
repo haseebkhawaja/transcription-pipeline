@@ -54,16 +54,8 @@ class WhisperTranscriber:
         segments_iter, info = self._model.transcribe(
             audio_path,
             beam_size=5,
-            # VAD filter drops silent/non-speech stretches before they ever
-            # reach the decoder -- this is the main fix for hallucinated
-            # text appearing over trailing silence.
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
-            # Without this, Whisper conditions each segment's decoding on
-            # the text of the previous segment, which lets a hallucination
-            # (or an error) "infect" every segment after it. Turning it off
-            # makes each segment decode independently, at a small cost to
-            # cross-segment consistency (e.g. speaker names re-explained).
             condition_on_previous_text=False,
         )
 

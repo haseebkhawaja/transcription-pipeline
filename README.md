@@ -22,7 +22,6 @@ app/
   transcriber.py   WhisperTranscriber (faster-whisper on GPU) + chunk merge
   pipeline.py      orchestrates the above into one call
   main.py          FastAPI app (the HTTP layer)
-sample_audio/      sample files (short mp3/wav)
 sample_output.json real output from an actual pipeline run
 ```
 
@@ -109,65 +108,6 @@ transcription, merge, and completion. Set the log level via standard Python
 logging config if you need more/less detail.
 
 ---
-
-## Design question: How do you handle different audio formats?
-
-**Normalize everything to one canonical format immediately, before
-anything else touches the file.** Specifically: 16kHz, mono, 16-bit PCM
-WAV, via `ffmpeg`. This is the format Whisper-family models expect
-internally anyway, so doing it up front means every downstream stage
-(chunking, transcription) is format-agnostic and only has to deal with one
-shape of input.
-
-Concretely:
-- **Detection isn't extension-based.** File extensions lie (mislabeled
-  files, no extension at all). `ffprobe` sniffs the actual container/codec
-  from file bytes, and that's what actually decides whether a file is
-  usable — the extension check in the API layer is just a fast, friendly
-  pre-check, not the source of truth.
-- **Validation happens before conversion.** `probe_audio()` confirms the
-  file has a readable audio stream and a determinable duration. If it
-  doesn't (corrupt file, video-only file, truncated upload), we reject with
-  a clear 422 error instead of letting it fail deep inside the STT model
-  with a confusing stack trace.
-- **Channel/sample-rate normalization is one ffmpeg call:** `-ac 1`
-  downmixes any channel count to mono, `-ar 16000` resamples to 16kHz,
-  `-sample_fmt s16` standardizes bit depth. Stereo, 44.1/48kHz files, mp3,
-  m4a, ogg, flac — all converge to the same canonical WAV.
-
-## Design question: How do you deal with long audio files?
-
-Three separate concerns, handled independently:
-
-**1. Splitting the file.** Files under a threshold (15 min) are treated as
-a single chunk — no need to add complexity for short files. Longer files
-are split into fixed 10-minute windows with a 2-second overlap between
-consecutive windows, so words spoken right at a cut point aren't lost.
-I chose fixed-length windows over silence-based splitting for
-predictability and simplicity; a silence-aware splitter (via ffmpeg's
-`silencedetect` filter) is a natural upgrade if boundary cuts prove to be a
-real accuracy problem in practice.
-
-**2. Merging chunks back into one timeline.** Each chunk's segments are
-offset by that chunk's start time in the original file. The overlap region
-between consecutive chunks would otherwise produce duplicate text — I drop
-segments starting before the midpoint of the overlap window, since the
-previous chunk had more lead-in context for that audio. This is a
-deliberate simplification: it's not real text alignment, so a sentence
-that straddles the cutoff exactly could occasionally get truncated or
-duplicated. A more robust version would fuzzy-match text in the overlap
-window and splice at the best match — noted here rather than over-building
-it for a take-home.
-
-**3. Not blocking the request for the full transcription time.** This
-implementation is synchronous for simplicity, but for real long files (a
-3-hour podcast) I would *not* hold an HTTP connection open the whole time.
-The change I'd make: `POST /transcribe` kicks off a background job and
-immediately returns a job ID; `GET /jobs/{id}` polls for status/result
-(e.g. via a task queue like Celery/RQ, or FastAPI `BackgroundTasks` for a
-lighter-weight version). Independent chunks are also naturally
-parallelizable — separate workers or batched GPU inference — since chunk
-transcription has no cross-chunk dependency until the merge step.
 
 ## If I had more time
 
