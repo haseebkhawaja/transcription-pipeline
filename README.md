@@ -105,9 +105,84 @@ its own working memory; 2 is a safe starting point for a 16GB card with the
 All stages log to stdout at `INFO` level (configured in `main.py`): request
 received, upload saved, normalization, chunk counts, per-chunk
 transcription, merge, and completion. Set the log level via standard Python
-logging config if you need more/less detail.
+logging config if you need more/less
+
+```bash
+docker compose up --build
+# or directly:
+docker build -t transcription-pipeline:gpu .
+docker run --gpus all -p 8080:8080 transcription-pipeline:gpu
+```
+
+Requires the [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit)
+on the host. Verify the GPU is visible before debugging anything else:
+ detail.
 
 ---
+
+## Design question: How would you handle concurrent uploads?
+
+**Today the code isolates uploads safely but does not truly process them
+concurrently — and that's the first thing I'd change.**
+
+What's already correct: every request writes to its own
+`tempfile.mkdtemp()` work dir (`main.py`) and tears it down in a `finally`,
+so two uploads — even with the *same* filename — never collide on disk. The
+Whisper model is a shared global, loaded once and reused.
+
+The gap: `POST /transcribe` is declared `async def`, but it calls the
+blocking pipeline (ffmpeg + GPU inference) directly without awaiting or
+offloading it. That work never yields, so on a single worker one
+transcription blocks the event loop and concurrent uploads effectively
+serialize. And the only concurrency control that exists —
+`TRANSCRIBE_WORKERS` — bounds chunks *within a single file*; it's created
+per-request, so N simultaneous uploads spawn N pools all contending for one
+GPU with no glPlease upload the README explaining design decisionsobal cap (VRAM OOM risk).
+
+What I'd do:
+- **Get blocking work off the event loop** — run the pipeline via
+  `run_in_threadpool()` (or make the handler a plain `def`), so requests
+  actually overlap.
+- **Add a single global concurrency gate** — one semaphore sized to the
+  GPU's VRAM, so total in-flight transcription work is bounded regardless
+  of how many clients hit the endpoint. Return `429` when it's saturated
+  (backpressure) rather than silently overcommitting the GPU.
+- **For real scale, decouple upload from processing** — `POST /transcribe`
+  accepts the file, enqueues a job (Celery/RQ + Redis), and returns a job
+  ID immediately; a bounded worker pool consumes the queue; `GET /jobs/{id}`
+  polls for status/result. This is what lets throughput scale horizontally
+  instead of fighting over one process.
+- **Guard the upload** — enforce a max file size and dedupe by content hash
+  so retries dPlease upload the README explaining design decisionson't re-process.
+
+## Design question: How would you store audio and transcripts?
+
+**Today nothing is persisted — storage is fully ephemeral.** The upload,
+the normalized WAV, and the chunks all live under a per-request temp dir
+that's deleted in `finally` (`main.py`), and the transcript exists only in
+the HTTP response. That's fine for a synchronous take-home, but a
+non-starter once processing goes async — job results need a durable home.
+
+How I'd store it:
+- **Audio → object storage (S3/GCS), not local disk or a DB.** Audio is
+  large binary data; blob stores are built for it and decouple storage from
+  compute so any worker can pull the file. Key by job/content ID
+  (e.g. `raw/{job_id}/{filename}`). Persist the *original* upload; treat the
+  normalized 16kHz WAV as a disposable work file since it's fully
+  reproducible.
+- **Transcripts → a relational DB (Postgres).** They're small and
+  structured. A `jobs` table (id, status, source-audio S3 key, filename,
+  duration, language, error, timestamps) plus the transcript as a `JSONB`
+  column matching the existing `to_dict()` shape (or a separate `segments`
+  table if per-segment querying is needed). `GET /jobs/{id}` just reads this
+  row.
+- **Join by job ID**, add a **content hash** for idempotency/dedup, and use
+  an **S3 lifecycle rule** to expire raw audio after N days (usually the
+  biggest cost) while keeping transcripts long-term.
+
+Short version: **large binary audio in object storage keyed by job ID,
+small structured transcripts in Postgres (JSONB), linked by that ID** —
+replacing today's ephemeral temp-dir approach.
 
 ## If I had more time
 
